@@ -153,12 +153,38 @@ async def _run_provider(provider: str, guild_ids: Optional[List[int]] = None) ->
         metrics=metrics, egress=egress, agent_meta=meta,
     )
     adapter = DiscordAdapter(discord_settings)
+
+    # Optional control-plane HTTP server (the deile-cli → deile-bot flecha reversa).
+    control_plane = None
+    try:
+        from deile_bot.runtime.control_plane import (
+            ControlPlaneServer,
+            ControlPlaneSettings,
+        )
+
+        cp_settings = ControlPlaneSettings()
+        if cp_settings.enabled and cp_settings.auth_token:
+            control_plane = ControlPlaneServer(cp_settings, version="0.1.0")
+            control_plane.audit_logger = audit
+            control_plane.identity = identity
+        elif cp_settings.enabled and not cp_settings.auth_token:
+            import logging as _logging
+
+            _logging.getLogger("deile_bot.cli").warning(
+                "control_plane disabled: DEILE_BOT_CONTROL_PLANE_AUTH_TOKEN not set"
+            )
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger("deile_bot.cli").exception("control_plane init failed; continuing without it")
+
     runtime = SingleProviderRuntime(
         adapter,
         ingress,
         capability_catalog=catalog,
         agent_meta=meta,
         formatters=formatters,
+        control_plane=control_plane,
     )
     try:
         await runtime.start()

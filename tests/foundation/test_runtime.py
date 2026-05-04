@@ -96,6 +96,43 @@ class TestSingleProviderRuntime:
         finally:
             await rt.stop()
 
+    async def test_stop_calls_control_plane_stop_even_when_adapter_raises(self, store):
+        """Regression: SingleProviderRuntime.stop() previously awaited
+        adapter.stop() unprotected, so a raising adapter left the
+        control-plane port leaked. The stop() must always attempt
+        control_plane.stop(); the original exception still propagates so
+        callers see it. See `single_runtime.SingleProviderRuntime.stop`.
+        """
+
+        class _BadAdapter(FakeProviderAdapter):
+            async def stop(self):
+                raise RuntimeError("adapter crash on stop")
+
+        class _RecordingControlPlane:
+            def __init__(self):
+                self.start_called = False
+                self.stop_called = False
+
+            def register_adapter(self, name, adapter):
+                pass
+
+            async def start(self):
+                self.start_called = True
+                return 0
+
+            async def stop(self):
+                self.stop_called = True
+
+        bad = _BadAdapter()
+        pipeline = _build_pipeline(store, bad)
+        cp = _RecordingControlPlane()
+        rt = SingleProviderRuntime(bad, pipeline, control_plane=cp)
+        await rt.start()
+        with pytest.raises(RuntimeError, match="adapter crash on stop"):
+            await rt.stop()
+        # CRITICAL: the control-plane was still stopped despite the adapter raising.
+        assert cp.stop_called is True
+
     async def test_pipeline_exception_is_logged_not_raised(self, store):
         adapter = FakeProviderAdapter()
         pipeline = _build_pipeline(store, adapter)

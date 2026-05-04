@@ -317,6 +317,50 @@ class IngressPipeline:
         # 9. capability snapshot + extra prompt
         snap = await self.capability_catalog.snapshot(adapter, self.agent_meta)
         extra = self.capability_catalog.render_for_system_prompt(snap)
+        # Eagerly download image attachments and base64-encode them in the
+        # bot process. Discord CDN URLs since 2024 carry expiring signatures
+        # (`?ex=…&is=…&hm=…`), so passing the URL to DEILE risks 403 by the
+        # time DEILE goes to download. The bot is the connected client and
+        # already has access — do the IO once here.
+        # Cap: 4 MiB per image (≈5.4 MiB base64) to avoid bloating the LLM
+        # context. Larger attachments fall back to URL-only and DEILE gets
+        # to decide whether to try the (possibly expired) URL.
+        att_summaries = await self._materialize_attachments(env.attachments)
+        # Append a <bot_context> block so the LLM (not just the tools) can
+        # see channel/owner info and — critically — inbound attachments.
+        # Without this the agent sees the attachments only via tool ctx,
+        # which it never inspects unless prompted.
+        ctx_lines = [
+            "<bot_context>",
+            f"provider: {provider}",
+            f"channel_scope: {scope}",
+            f"channel_id: {env.channel.provider_channel_id}",
+            f"channel_name: {env.channel.name or '-'}",
+            f"is_owner: {is_owner}",
+            f"persona: {persona}",
+        ]
+        if att_summaries:
+            ctx_lines.append("attachments:")
+            for s in att_summaries:
+                marker = "base64_inline" if s.get("data_base64") else "url_only"
+                ctx_lines.append(
+                    f"  - kind={s['kind']} mime={s.get('mime') or '?'} "
+                    f"filename={s.get('filename') or '?'} "
+                    f"size_bytes={s.get('size_bytes') or 0} delivery={marker}"
+                )
+                if s.get("data_base64"):
+                    # Don't dump the full base64 into the system prompt — it
+                    # would dominate context. The agent reads it from
+                    # bot_context.attachments[*].data_base64 (kwarg).
+                    ctx_lines.append(
+                        f"    data_base64: <{len(s['data_base64'])} chars in bot_context.attachments[].data_base64>"
+                    )
+                if s.get("url"):
+                    ctx_lines.append(f"    url: {s['url']}")
+                if s.get("download_error"):
+                    ctx_lines.append(f"    download_error: {s['download_error']}")
+        ctx_lines.append("</bot_context>")
+        extra = extra + "\n\n" + "\n".join(ctx_lines)
         bot_settings = get_bot_settings().foundation
         # 10. agent invoke
         inv = AgentInvocation(
@@ -336,6 +380,11 @@ class IngressPipeline:
                 "channel_name": env.channel.name,
                 "is_owner": is_owner,
                 "persona": persona,
+                # Surface inbound attachments so the agent can call
+                # vision_describe_image (or similar) on URLs without
+                # the agent having to ask. Discord CDN URLs are public,
+                # no auth required to download.
+                "attachments": att_summaries,
             },
             timeout_seconds=bot_settings.agent_invocation_timeout_seconds,
         )
@@ -393,3 +442,80 @@ class IngressPipeline:
         await self.egress.send_response(
             adapter, env, response, persona, target_bot_user_id=user.bot_user_id
         )
+
+    # ------------------------------------------------------------------
+    # attachment materialization
+    # ------------------------------------------------------------------
+
+    # Per-image cap: 4 MiB raw → ~5.4 MiB base64. Anything larger falls
+    # back to URL-only (the agent decides whether to call vision_describe_image
+    # with the URL — Gemini handles up to 20 MB inline anyway, but we don't
+    # want a 20 MB blob in our LLM context).
+    _IMAGE_INLINE_BYTES_LIMIT = 4 * 1024 * 1024
+    _IMAGE_DOWNLOAD_TIMEOUT_S = 12.0
+
+    async def _materialize_attachments(self, attachments) -> list:
+        """Build the bot_context.attachments list.
+
+        For image kind, eagerly fetch + base64-encode (so DEILE doesn't
+        have to re-download from a possibly-expired Discord CDN URL).
+        For non-image kinds (or oversize/failed images), keep URL-only.
+        Errors are recorded inline as `download_error` so the agent can
+        decide what to do (skip, retry via URL, ask user).
+        """
+        import asyncio
+        import base64 as _b64
+
+        try:
+            import httpx  # noqa: F401  (httpx is already in deps)
+        except ImportError:
+            httpx = None  # type: ignore[assignment]
+
+        results: list = []
+
+        async def _fetch_one(att):
+            kind_str = att.kind.value if hasattr(att.kind, "value") else str(att.kind)
+            entry: dict = {
+                "kind": kind_str,
+                "url": att.url,
+                "mime": att.mime,
+                "filename": att.filename,
+                "size_bytes": att.size_bytes,
+            }
+            # Only image-kind attachments get inlined; other kinds keep
+            # the URL so a future tool can decide.
+            if kind_str.upper() != "IMAGE" or not att.url:
+                return entry
+            if att.size_bytes and att.size_bytes > self._IMAGE_INLINE_BYTES_LIMIT:
+                entry["download_error"] = (
+                    f"too large to inline ({att.size_bytes} > {self._IMAGE_INLINE_BYTES_LIMIT})"
+                )
+                return entry
+            if httpx is None:
+                entry["download_error"] = "httpx not installed"
+                return entry
+            try:
+                import httpx as _httpx
+                async with _httpx.AsyncClient(
+                    timeout=self._IMAGE_DOWNLOAD_TIMEOUT_S, follow_redirects=True
+                ) as cli:
+                    async with cli.stream("GET", att.url) as resp:
+                        if resp.status_code >= 400:
+                            entry["download_error"] = f"upstream {resp.status_code}"
+                            return entry
+                        buf = bytearray()
+                        async for chunk in resp.aiter_bytes():
+                            buf.extend(chunk)
+                            if len(buf) > self._IMAGE_INLINE_BYTES_LIMIT:
+                                entry["download_error"] = "exceeded cap mid-download"
+                                return entry
+            except Exception as e:
+                entry["download_error"] = f"{type(e).__name__}: {e}"
+                return entry
+            entry["data_base64"] = _b64.b64encode(bytes(buf)).decode("ascii")
+            entry["size_bytes"] = entry.get("size_bytes") or len(buf)
+            return entry
+
+        results = await asyncio.gather(*[_fetch_one(a) for a in attachments])
+        return list(results)
+

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deile-bot"
+version = "0.1.0"
+description = "DEILE instant-messaging bot daemon (Discord/Telegram/WhatsApp/Meta) + control-plane HTTP API"
+authors = [{ name = "elimarcavalli" }]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "aiosqlite>=0.19",
+    "aiohttp>=3.9",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+    "tenacity>=8.0",
+    # The bot keeps DEILE as a hard dependency for the in-process bridge.
+    # When running the daemon you'd install both repos in editable mode.
+    # Listed via path for local dev; remove for publishing.
+]
+
+[project.optional-dependencies]
+discord = ["discord.py>=2.3,<3.0"]
+telegram = ["python-telegram-bot>=20"]
+whatsapp = ["httpx>=0.25"]
+meta = ["httpx>=0.25"]
+all-bots = [
+    "discord.py>=2.3,<3.0",
+    "python-telegram-bot>=20",
+    "httpx>=0.25",
+]
+client = ["httpx>=0.25", "tenacity>=8.0", "pydantic>=2.0", "pydantic-settings>=2.0"]
+
+[project.scripts]
+deile-bot = "deile_bot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["deile_bot*", "deile_bot_client*"]
+exclude = ["tests*", "PATCHES*", "PLANS*", "RUNS*", "logs*"]
