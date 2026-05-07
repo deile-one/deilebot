@@ -157,3 +157,4 @@ temp/
 scratch/
 _testing.py
 !deilebot/_testing.py
+.claude/settings.local.json
