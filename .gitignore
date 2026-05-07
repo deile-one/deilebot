@@ -156,3 +156,4 @@ temp/
 .tmp/
 scratch/
 _testing.py
+!deilebot/_testing.py

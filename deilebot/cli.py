@@ -5,9 +5,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional
+
+logger = logging.getLogger("deilebot.cli")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -186,11 +190,58 @@ async def _run_provider(provider: str, guild_ids: Optional[List[int]] = None) ->
         formatters=formatters,
         control_plane=control_plane,
     )
+
+    # Optional CronRunner (intent #86)
+    cron_runner = None
+    if os.environ.get("DEILE_CRON_AUTOSTART") == "1":
+        try:
+            from deile.cron.store import CronStore
+            from deile.cron.runner import CronRunner
+            from deile.cron.agent_bridge import make_fire_callback  # may not exist yet
+            from deilebot.bridge.dm_tool import send_discord_dm  # legacy import
+
+            cron_db = Path(os.environ.get("DEILE_CRON_DB_PATH", "data/cron.db"))
+            cron_store = CronStore(cron_db)
+
+            async def _agent_provider():
+                return await agent_provider()
+
+            cron_runner = CronRunner(
+                cron_store,
+                fire_callback=make_fire_callback(_agent_provider),
+                notify_dm=send_discord_dm,
+            )
+            await cron_runner.start()
+            logger.info("CronRunner started")
+        except Exception as e:
+            logger.warning("CronRunner not started: %s", e)
+
+    # Optional PipelineMonitor (intent #87)
+    pipeline_monitor = None
+    if os.environ.get("DEILE_PIPELINE_AUTOSTART") == "1":
+        try:
+            from deile.orchestration.pipeline.monitor import PipelineMonitor, PipelineConfig
+
+            cfg = PipelineConfig(
+                repo=os.environ.get("DEILE_PIPELINE_REPO", "elimarcavalli/deile"),
+                base_repo_path=Path(os.environ.get("DEILE_PIPELINE_BASE_PATH", ".")),
+                notify_user_id=os.environ.get("DEILE_PIPELINE_NOTIFY_USER_ID"),
+            )
+            pipeline_monitor = PipelineMonitor(cfg)
+            await pipeline_monitor.start()
+            logger.info("PipelineMonitor started")
+        except Exception as e:
+            logger.warning("PipelineMonitor not started: %s", e)
+
     try:
         await runtime.start()
     except KeyboardInterrupt:
         pass
     finally:
+        if cron_runner is not None:
+            await cron_runner.stop()
+        if pipeline_monitor is not None:
+            await pipeline_monitor.stop()
         await runtime.stop()
         await store.close()
     return 0

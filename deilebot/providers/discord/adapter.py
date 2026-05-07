@@ -86,12 +86,29 @@ class DiscordAdapter(ProviderAdapter):
                     from deilebot.providers.discord.cogs.reaction_cog import \
                         ReactionCog
 
+                    from deilebot.providers.discord.cogs.idea_cog import IdeaCog
+
                     if "AgentCog" not in cog_names:
                         await client.add_cog(AgentCog(client, self.runtime, self))
                     if "CapabilitiesCog" not in cog_names:
                         await client.add_cog(CapabilitiesCog(client, self.runtime, self))
                     if "ReactionCog" not in cog_names:
                         await client.add_cog(ReactionCog(client, self.runtime, self))
+                    if "IdeaCog" not in cog_names:
+                        await client.add_cog(IdeaCog(client, self.runtime, self))
+                    # CronCog — optional, requires CronStore
+                    if "CronCog" not in cog_names:
+                        try:
+                            import os
+                            from pathlib import Path as _Path
+                            from deile.cron.store import CronStore as _CronStore
+                            from deilebot.providers.discord.cogs.cron_cog import CronCog
+
+                            _cron_db = _Path(os.environ.get("DEILE_CRON_DB_PATH", "data/cron.db"))
+                            _cron_store = _CronStore(_cron_db)
+                            await client.add_cog(CronCog(client, _cron_store))
+                        except Exception as _cron_err:
+                            self._logger.warning("CronCog not loaded: %s", _cron_err)
                 if self.settings.slash_sync_guild_ids:
                     for gid in self.settings.slash_sync_guild_ids:
                         await client.tree.sync(guild=discord.Object(id=gid))

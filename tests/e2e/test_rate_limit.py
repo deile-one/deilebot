@@ -20,7 +20,7 @@ from deilebot.foundation.persona_selector import PersonaSelector
 from deilebot.foundation.pipeline import EgressPipeline, IngressPipeline
 from deilebot.foundation.rate_limit import RateLimiter
 from deilebot.foundation.settings import BotSettings, FoundationSettings
-from deilebot.tests.e2e.conftest import CapturingFakeBridge
+from tests.e2e.conftest import CapturingFakeBridge
 
 pytestmark = pytest.mark.e2e
 

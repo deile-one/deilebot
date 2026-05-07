@@ -6,6 +6,10 @@ import json
 
 import pytest
 
+# The migration script lives outside the deilebot package (scripts/ at repo root).
+# Skip this entire module gracefully when the script is not importable.
+pytest.importorskip("scripts.migrate_memory_json_to_sqlite", reason="scripts/ not installed")
+
 from deilebot.foundation.conversation_store import ConversationStore
 from deilebot.foundation.envelope import Channel, ChannelScope
 from scripts.migrate_memory_json_to_sqlite import migrate
