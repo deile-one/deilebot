@@ -96,6 +96,9 @@ class DiscordAdapter(ProviderAdapter):
                         await client.add_cog(ReactionCog(client, self.runtime, self))
                     if "IdeaCog" not in cog_names:
                         await client.add_cog(IdeaCog(client, self.runtime, self))
+                    if "AdminCog" not in cog_names:
+                        from deilebot.providers.discord.cogs.admin_cog import AdminCog
+                        await client.add_cog(AdminCog(client, self.runtime, self))
                     # CronCog — optional, requires CronStore
                     if "CronCog" not in cog_names:
                         try:
