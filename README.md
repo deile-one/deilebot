@@ -174,16 +174,14 @@ O ponto de entrada `cli.py` possui utilitários avançados de manutenção:
 
 ## 📁 Arquivos de Configuração
 
-A configuração do bot é feita declarativamente via `YAML` e variáveis de ambiente:
+A configuração do bot é feita via `YAML` e variáveis de ambiente:
 
 | Arquivo | Propósito |
 | :--- | :--- |
-| `deile/config/api_config.yaml` | Endpoints de API dos provedores de IA e mapeamentos de modelos. |
-| `deile/config/commands.yaml` | Registro de Slash Commands disponíveis. |
-| `deile/config/persona_config.yaml` | Regras de seleção de personas (ex: qual persona usar por provedor/canal). |
-| `deile/config/system_config.yaml` | Configurações do agente core Deile (auto_discover_tools, max_context_tokens, etc). |
-| `config/settings.json` | Configurações locais do runtime (working_directory, log_level, default_model). |
+| `config/deilebot.yaml` | Configuração principal do runtime (foundation, permissions, personas). Criado manualmente; se ausente, usa defaults. |
 | `.env` | Variáveis de ambiente sensíveis: `DEILE_BOT_DISCORD_TOKEN`, chaves de LLM, etc. *(Ignorado pelo Git)* |
+
+> **Nota:** Os arquivos `deile/config/api_config.yaml`, `commands.yaml`, `persona_config.yaml` e `system_config.yaml` pertencem ao repositório [`elimarcavalli/deile`](https://github.com/elimarcavalli/deile) (agente core), não ao `deile-bot`.
 
 ---
 

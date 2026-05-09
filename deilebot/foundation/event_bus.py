@@ -1,4 +1,4 @@
-"""BotEventBus — wraps deile.events.event_bus with bot-prefixed event types."""
+"""BotEventBus — async event bus for bot-internal notifications."""
 
 from __future__ import annotations
 
@@ -19,8 +19,6 @@ class BotEventType(str, Enum):
     PERMISSION_DENIED = "bot.permission.denied"
     RATE_LIMITED = "bot.rate.limited"
     DLQ_ENQUEUED = "bot.dlq.enqueued"
-    DLQ_REPLAYED = "bot.dlq.replayed"
-    CONFIG_RELOADED = "bot.config.reloaded"
 
 
 class BotEventBus:

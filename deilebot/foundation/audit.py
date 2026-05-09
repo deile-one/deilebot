@@ -21,7 +21,6 @@ class AuditEventType(str, Enum):
     PERMISSION_DENIED = "permission_denied"
     RATE_LIMITED = "rate_limited"
     DLQ_ENQUEUED = "dlq_enqueued"
-    DLQ_REPLAYED = "dlq_replayed"
 
 
 class BotAuditLogger:
