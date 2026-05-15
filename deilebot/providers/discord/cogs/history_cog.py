@@ -93,13 +93,56 @@ def _ts(dt_or_str) -> str:
     return s[:16].replace("T", " ")
 
 
-def _fmt_render_lines_for_messages(msgs) -> str:
-    """Render message rows ASCII-style, newest first."""
+def _fmt_render_lines_for_messages(msgs, names: Optional[dict] = None) -> str:
+    """Render message rows ASCII-style, newest first.
+
+    ``names`` maps ``bot_user_id`` → display name. When provided and the
+    channel has more than one inbound participant, the line is prefixed
+    with the sender name. For single-user DMs (and outbound msgs from the
+    bot itself) the name would only add noise so it's omitted.
+    """
+    names = names or {}
+    # Count unique inbound senders to decide if name labels add value.
+    inbound_senders = {m.bot_user_id for m in msgs if m.direction == "inbound" and m.bot_user_id}
+    multi_party = len(inbound_senders) > 1
+
     out = []
     for m in msgs:
         arrow = "→" if m.direction == "inbound" else "←"
-        out.append(f"`{_ts(m.sent_at)}` {arrow} {_short(m.text)}")
+        prefix = ""
+        if multi_party and m.direction == "inbound" and m.bot_user_id in names:
+            prefix = f"[{names[m.bot_user_id]}] "
+        out.append(f"`{_ts(m.sent_at)}` {arrow} {prefix}{_short(m.text)}")
     return "\n".join(out)
+
+
+def _format_channel_label(ch: dict) -> str:
+    """Build a human-friendly label for a channel row from list_channels.
+
+    - DM:    "DM com <display_name>"  (or "DM <channel_id>" if name absent)
+    - GROUP: "#<channel.name>"        (or fallback to channel_id)
+    - Unknown scope: channel_id verbatim.
+
+    Participants are appended in parens when the count > 1 (GROUP).
+    """
+    scope = (ch.get("scope") or "").upper()
+    ch_id = ch.get("provider_channel_id") or "?"
+    name = ch.get("name")
+    parts_raw = ch.get("participant_names") or ""
+    parts = [p for p in parts_raw.split(",") if p]
+
+    if scope == "DM":
+        if parts:
+            return f"DM com **{parts[0]}**"
+        return f"DM `{ch_id}`"
+    if scope == "GROUP":
+        base = f"#**{name}**" if name else f"GROUP `{ch_id}`"
+        if len(parts) > 1:
+            return f"{base} (com {', '.join(parts)})"
+        if len(parts) == 1:
+            return f"{base} (com {parts[0]})"
+        return base
+    return f"`{ch_id}`"
 
 
 class HistoryCog(commands.Cog):
@@ -157,7 +200,7 @@ class HistoryCog(commands.Cog):
             for u in users:
                 pid = f"{u['provider']}:{u['provider_user_id']}"
                 lines.append(
-                    f"• `{pid}` — **{u['display_name'] or '?'}** · "
+                    f"• **{u['display_name'] or '?'}** `{pid}` · "
                     f"{u['msg_count']} msgs · last={_ts(u['last_seen_at'])}"
                 )
             sections.append("\n".join(lines))
@@ -165,10 +208,9 @@ class HistoryCog(commands.Cog):
         if channels:
             lines = [f"📺 **canais ({len(channels)})**:"]
             for ch in channels:
-                name = ch["name"] or "(sem nome)"
-                scope = ch["scope"] or "?"
+                label = _format_channel_label(ch)
                 lines.append(
-                    f"• `{ch['provider_channel_id']}` — **{name}** ({scope}) · "
+                    f"• {label} `{ch['provider_channel_id']}` · "
                     f"{ch['msg_count']} msgs · last={_ts(ch['last_msg_at'])}"
                 )
             sections.append("\n".join(lines))
@@ -199,7 +241,12 @@ class HistoryCog(commands.Cog):
         if not msgs:
             await ctx.send(header + "\n📭 sem mensagens.", ephemeral=True)
             return
-        body = _fmt_render_lines_for_messages(msgs)
+        # Resolve display_names for inbound senders so multi-party blocks
+        # (e.g. GROUP channels) show WHO said what.
+        names = await self._store.get_display_names_for_users(
+            [m.bot_user_id for m in msgs]
+        )
+        body = _fmt_render_lines_for_messages(msgs, names=names)
         full = f"{header}\n```\n{body}\n```"
         if len(full) > 1900:
             file = discord.File(io.BytesIO(body.encode()), filename=attachment_name)
@@ -256,9 +303,22 @@ class HistoryCog(commands.Cog):
             msgs = await self._store.list_messages_by_channel(
                 "discord", ch_id, limit=limit, search=busca,
             )
+            # Build a rich header — find the channel row to derive the
+            # "DM com X" / "#name (com Y, Z)" label. We list and filter
+            # because there's no single-channel store getter that returns
+            # participant_names.
+            all_channels = await self._store.list_channels(limit=200)
+            ch_row = next(
+                (c for c in all_channels if c["provider_channel_id"] == ch_id),
+                None,
+            )
+            label = (
+                _format_channel_label(ch_row) if ch_row else f"`{ch_id}`"
+            )
             header = (
-                f"📺 **Canal `{ch_id}`** — últimas {len(msgs)}"
+                f"📺 **{label}** — últimas {len(msgs)}"
                 + (f" com `{busca}`" if busca else "")
+                + f"\n`channel_id={ch_id}`"
             )
             return await self._render_message_block(
                 ctx, header, msgs, f"historico_canal_{ch_id}.txt",
@@ -343,11 +403,12 @@ class HistoryCog(commands.Cog):
             return
         lines = [f"📺 **{len(channels)} canal(is):**\n"]
         for ch in channels:
-            name = ch["name"] or "(sem nome)"
-            scope = ch["scope"] or "?"
+            label = _format_channel_label(ch)
+            scope = (ch["scope"] or "?")
             lines.append(
-                f"• `{ch['provider_channel_id']}` — **{name}** ({scope}) · "
-                f"{ch['msg_count']} msgs · last={_ts(ch['last_msg_at'])}"
+                f"• {label} ({scope}) · "
+                f"{ch['msg_count']} msgs · last={_ts(ch['last_msg_at'])}\n"
+                f"   `channel_id={ch['provider_channel_id']}`"
             )
         lines.append(
             f"\n💡 Para mensagens: `/historico channel_id:{channels[0]['provider_channel_id']}`"

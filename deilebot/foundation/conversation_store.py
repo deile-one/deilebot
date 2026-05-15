@@ -735,8 +735,11 @@ class ConversationStore:
 
         Uses the ``message`` table as source of truth (some channels may
         have been seen without being persisted in the ``channel`` table —
-        the LEFT JOIN keeps them visible). Sorted by last message DESC.
-        Used by ``/historico_canais`` so the operator can pick a channel.
+        the LEFT JOIN keeps them visible). ``participant_names`` is a
+        comma-joined string of distinct ``bot_user.display_name`` for
+        every non-bot user that talked in the channel — crucial for DM
+        labels (where ``channel.name`` is NULL but the counterpart is
+        the obvious identifier).  Sorted by last message DESC.
         """
         db = self._require_db()
         cursor = await db.execute(
@@ -744,7 +747,15 @@ class ConversationStore:
             SELECT m.provider, m.provider_channel_id,
                    COUNT(*) AS msg_count,
                    MAX(m.sent_at) AS last_msg_at,
-                   c.name, c.scope, c.parent_channel_id
+                   c.name, c.scope, c.parent_channel_id,
+                   (
+                     SELECT GROUP_CONCAT(DISTINCT u.display_name)
+                     FROM message m2
+                     JOIN bot_user u ON u.bot_user_id = m2.bot_user_id
+                     WHERE m2.provider = m.provider
+                       AND m2.provider_channel_id = m.provider_channel_id
+                       AND COALESCE(u.is_bot, 0) = 0
+                   ) AS participant_names
             FROM message m
             LEFT JOIN channel c
               ON c.provider = m.provider
@@ -766,9 +777,36 @@ class ConversationStore:
                 "name": r[4],
                 "scope": r[5],
                 "parent_channel_id": r[6],
+                "participant_names": r[7],
             }
             for r in rows
         ]
+
+    async def get_display_names_for_users(
+        self, bot_user_ids: List[str]
+    ) -> Dict[str, str]:
+        """Bulk-resolve display names for a list of bot_user_ids.
+
+        Used by the history rendering layer to label each message line
+        with WHO sent it — particularly useful in GROUP channels where
+        multiple bot_users can post. Returns an empty mapping for empty
+        input; missing ids are simply absent from the returned dict.
+        """
+        if not bot_user_ids:
+            return {}
+        unique = list({bid for bid in bot_user_ids if bid})
+        if not unique:
+            return {}
+        db = self._require_db()
+        placeholders = ",".join("?" for _ in unique)
+        cursor = await db.execute(
+            f"SELECT bot_user_id, display_name FROM bot_user "
+            f"WHERE bot_user_id IN ({placeholders})",
+            unique,
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return {r[0]: (r[1] or "?") for r in rows}
 
     async def list_messages_by_channel(
         self,
