@@ -9,7 +9,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import aiosqlite
 
@@ -600,4 +600,132 @@ class ConversationStore:
             name=row[0],
             scope=ChannelScope(row[1]),
             parent_channel_id=row[2],
+        )
+
+    # ------------------------------------------------------------------
+    # History introspection — used by HistoryCog.
+    # Read-only adds; existing APIs untouched.
+    # ------------------------------------------------------------------
+
+    async def list_users(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return every bot_user with message count and last_seen_at.
+
+        Sorted by last_seen DESC. Used by /historico_canais (admin) so the
+        owner can pick a user to inspect.
+        """
+        db = self._require_db()
+        cursor = await db.execute(
+            """
+            SELECT u.bot_user_id, u.provider, u.provider_user_id, u.display_name,
+                   u.last_seen_at,
+                   (SELECT COUNT(*) FROM message m WHERE m.bot_user_id = u.bot_user_id) AS msg_count
+            FROM bot_user u
+            ORDER BY u.last_seen_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [
+            {
+                "bot_user_id": r[0],
+                "provider": r[1],
+                "provider_user_id": r[2],
+                "display_name": r[3],
+                "last_seen_at": r[4],
+                "msg_count": r[5],
+            }
+            for r in rows
+        ]
+
+    async def list_messages_by_user(
+        self,
+        bot_user_id: str,
+        *,
+        limit: int = 30,
+        search: Optional[str] = None,
+    ) -> List[StoredMessage]:
+        """Return messages for a given bot_user, newest first.
+
+        Used by /historico [user_id]. ``search`` does a case-insensitive
+        LIKE on the text column when provided.
+        """
+        db = self._require_db()
+        if search:
+            cursor = await db.execute(
+                """
+                SELECT id, provider, provider_channel_id, provider_message_id,
+                       direction, bot_user_id, text, reply_to_message_id,
+                       sent_at, persisted_at
+                FROM message
+                WHERE bot_user_id = ? AND text LIKE ? COLLATE NOCASE
+                ORDER BY sent_at DESC, id DESC
+                LIMIT ?
+                """,
+                (bot_user_id, f"%{search}%", limit),
+            )
+        else:
+            cursor = await db.execute(
+                """
+                SELECT id, provider, provider_channel_id, provider_message_id,
+                       direction, bot_user_id, text, reply_to_message_id,
+                       sent_at, persisted_at
+                FROM message
+                WHERE bot_user_id = ?
+                ORDER BY sent_at DESC, id DESC
+                LIMIT ?
+                """,
+                (bot_user_id, limit),
+            )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        out: List[StoredMessage] = []
+        for r in rows:
+            out.append(
+                StoredMessage(
+                    id=r[0],
+                    provider=r[1],
+                    provider_channel_id=r[2],
+                    provider_message_id=r[3],
+                    direction=r[4],
+                    bot_user_id=r[5],
+                    text=r[6],
+                    reply_to_message_id=r[7],
+                    sent_at=datetime.fromisoformat(r[8].replace("Z", "+00:00"))
+                    if r[8] and "T" in r[8]
+                    else datetime.now(timezone.utc),
+                    persisted_at=datetime.fromisoformat(r[9].replace("Z", "+00:00"))
+                    if r[9] and "T" in r[9]
+                    else datetime.now(timezone.utc),
+                )
+            )
+        return out
+
+    async def count_messages_by_user(self, bot_user_id: str) -> int:
+        db = self._require_db()
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM message WHERE bot_user_id = ?", (bot_user_id,)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row[0] if row else 0
+
+    async def get_user_by_bot_user_id(self, bot_user_id: str) -> Optional[BotUser]:
+        db = self._require_db()
+        cursor = await db.execute(
+            "SELECT bot_user_id, provider, provider_user_id, display_name, is_bot "
+            "FROM bot_user WHERE bot_user_id = ?",
+            (bot_user_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if not row:
+            return None
+        return BotUser(
+            bot_user_id=row[0],
+            provider=row[1],
+            provider_user_id=row[2],
+            display_name=row[3],
+            is_bot=bool(row[4]),
         )

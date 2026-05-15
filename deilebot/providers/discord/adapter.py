@@ -108,6 +108,9 @@ class DiscordAdapter(ProviderAdapter):
                     if "EventsCog" not in cog_names:
                         from deilebot.providers.discord.cogs.events_cog import EventsCog
                         await client.add_cog(EventsCog(client, self.runtime, self))
+                    if "HistoryCog" not in cog_names:
+                        from deilebot.providers.discord.cogs.history_cog import HistoryCog
+                        await client.add_cog(HistoryCog(client, self.runtime, self))
                     # CronCog — optional, requires CronStore
                     if "CronCog" not in cog_names:
                         try:
