@@ -46,6 +46,18 @@ def _build_parser() -> argparse.ArgumentParser:
     sub_persona = p_persona.add_subparsers(dest="persona_action", required=True)
     sub_persona.add_parser("list")
 
+    p_setup = sub.add_parser(
+        "setup", help="Interactive first-run configuration wizard"
+    )
+    p_setup.add_argument(
+        "--mode", choices=["local", "container"], default=None,
+        help="Skip the mode question and use this one",
+    )
+    p_setup.add_argument(
+        "--reconfigure", action="store_true",
+        help="Reconfigure even when a config already exists",
+    )
+
     return parser
 
 
@@ -53,6 +65,41 @@ async def _run_provider(provider: str, guild_ids: Optional[List[int]] = None) ->
     if provider != "discord":
         print(f"provider {provider} not yet wired in this branch", file=sys.stderr)
         return 2
+
+    # First-run guard: with no Discord token there is nothing to run.
+    # Offer the interactive wizard when stdin is a real terminal; fail
+    # with a clear pointer otherwise (e.g. inside a non-interactive pod).
+    from deilebot.providers.discord.settings import DiscordBotSettings
+
+    if not DiscordBotSettings().token.get_secret_value().strip():
+        from deilebot.foundation.setup_wizard import SetupError, SetupWizard
+
+        if not sys.stdin.isatty():
+            print(
+                "deilebot: DEILE_BOT_DISCORD_TOKEN não configurado.\n"
+                "Rode `deilebot setup` num terminal interativo, ou edite o "
+                "`.env` à mão (veja o README).",
+                file=sys.stderr,
+            )
+            return 78
+        print(
+            "Nenhum bot do Discord configurado ainda — abrindo o "
+            "assistente de configuração.\n",
+            file=sys.stderr,
+        )
+        try:
+            rc = await SetupWizard(Path.cwd()).run()
+        except SetupError as exc:
+            print(f"deilebot setup: {exc}", file=sys.stderr)
+            return 78
+        if rc == 0:
+            print(
+                "\nConfiguração concluída. Rode de novo para iniciar o bot:\n"
+                "   python -m deilebot run --provider discord",
+                file=sys.stderr,
+            )
+        return rc
+
     from deilebot.foundation.audit import BotAuditLogger
     from deilebot.foundation.capabilities import CapabilityCatalog
     from deilebot.foundation.conversation_store import ConversationStore
@@ -377,6 +424,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "persona":
         if args.persona_action == "list":
             return asyncio.run(_persona_list())
+    if args.command == "setup":
+        from deilebot.foundation.setup_wizard import run_setup
+
+        return run_setup(mode=args.mode, reconfigure=args.reconfigure)
     return 1
 
 

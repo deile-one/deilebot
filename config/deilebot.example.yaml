@@ -1,0 +1,51 @@
+# config/deilebot.yaml — configuração NÃO-secreta do runtime do deilebot.
+#
+# Copie para `config/deilebot.yaml` (na raiz do repositório `deile`, de onde
+# o bot é executado). Os segredos ficam no `.env`, nunca aqui.
+#
+# Atalho: `python -m deilebot setup` gera este arquivo interativamente.
+# Se ausente, o bot usa os defaults de `FoundationSettings`.
+
+foundation:
+  default_persona: developer
+  # heuristic | llm | always_respond_to_addressed | always_respond
+  intent_classifier: heuristic
+  # in_process | oneshot_subprocess
+  agent_bridge_mode: in_process
+  agent_invocation_timeout_seconds: 120
+  # per_user | per_user_channel | per_channel
+  session_strategy: per_user
+
+permissions:
+  # Donos do bot — forma estável `<provider>:<provider_user_id>`.
+  # No Discord: ative o Modo Desenvolvedor (Configurações -> Avançado),
+  # clique com o botão direito no seu nome -> "Copiar ID do usuário".
+  owners:
+    - "discord:000000000000000000"
+  allowlist_invoke_agent: ["*"]
+  blocklist: []
+  per_action:
+    EXECUTE_TOOL:  { mode: owner_only }
+    SEND_DM:       { mode: owner_only }
+    ADMIN_COMMAND: { mode: owner_only }
+    DEBUG_COMMAND: { mode: owner_only }
+
+personas:
+  default: developer
+
+providers:
+  enabled_providers: ["discord"]
+
+# Login GitHub via Discord (/github_login). O método PAT funciona sem nada
+# aqui. O método OAuth (device flow) precisa do Client ID de um GitHub
+# OAuth App registrado — o Client ID é público, não é segredo.
+github:
+  oauth_client_id: ""
+  oauth_scope: "repo"
+
+# Allowlist de repositórios que o deile-shell / deile-worker podem clonar
+# via git (modo container). Globs seguem as regras de fnmatch do Python.
+# Lista vazia ou campo ausente = qualquer repo é permitido.
+git_integration:
+  clonable_repos:
+    - "*"
