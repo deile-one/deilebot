@@ -23,7 +23,6 @@ from typing import Any, List, Optional, Tuple
 
 from deile.common.markup_ast import MarkupAST
 from deile.tools.base import ToolContext
-from deile.tools.dispatch_deile_task import DispatchDeileTaskTool
 
 from deilebot.foundation.envelope import (BotUser, Channel, ChannelScope,
                                            MessageEnvelope)
@@ -94,7 +93,27 @@ class SlashDispatchResult:
     metadata: dict = field(default_factory=dict)
 
 
-_DISPATCH_TOOL = DispatchDeileTaskTool()
+# ``DispatchDeileTaskTool`` é importada SOB DEMANDA. O módulo
+# ``deile.tools.dispatch_deile_task`` é uma dependência OPCIONAL — só o
+# caminho /deile a usa. Importá-la no topo deste módulo fazia um
+# ModuleNotFoundError (quando o worker stack não está instalado) derrubar
+# a carga de TODOS os cogs em ``adapter.on_ready`` — inclusive os que nada
+# têm a ver com dispatch. Com o import tardio, a ausência só afeta /deile.
+_DISPATCH_TOOL: Any = None
+
+
+def _get_dispatch_tool() -> Any:
+    """Devolve o ``DispatchDeileTaskTool`` (singleton), importando sob demanda.
+
+    Levanta ``ImportError`` se ``deile.tools.dispatch_deile_task`` não estiver
+    disponível — o chamador trata como erro de /deile, sem derrubar o bot.
+    """
+    global _DISPATCH_TOOL
+    if _DISPATCH_TOOL is None:
+        from deile.tools.dispatch_deile_task import DispatchDeileTaskTool
+
+        _DISPATCH_TOOL = DispatchDeileTaskTool()
+    return _DISPATCH_TOOL
 
 
 def build_envelope(
@@ -198,7 +217,16 @@ async def run_slash_dispatch(
         },
     )
     try:
-        result = await _DISPATCH_TOOL.execute(tool_ctx)
+        dispatch_tool = _get_dispatch_tool()
+    except ImportError as exc:
+        _logger.warning("slash_dispatch: DispatchDeileTaskTool indisponível — %s", exc)
+        return SlashDispatchResult(
+            kind="error",
+            reason="worker dispatch indisponível (deile.tools.dispatch_deile_task ausente)",
+            message_id=env.message_id,
+        )
+    try:
+        result = await dispatch_tool.execute(tool_ctx)
     except Exception as exc:  # noqa: BLE001
         _logger.exception("slash_dispatch: dispatch tool raised")
         return SlashDispatchResult(

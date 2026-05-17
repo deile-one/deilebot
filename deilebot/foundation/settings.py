@@ -90,6 +90,18 @@ class PersonaSettings(BaseModel):
     rules: List[PersonaRule] = Field(default_factory=list)
 
 
+class GitHubSettings(BaseModel):
+    """Config do login GitHub (ver o cog /github_login).
+
+    ``oauth_client_id`` é o Client ID *público* de um GitHub OAuth App
+    registrado — não é segredo. Vazio desativa o método OAuth
+    (device flow); o método PAT continua funcionando sem config.
+    """
+
+    oauth_client_id: str = ""
+    oauth_scope: str = "repo"
+
+
 class BotSettings(BaseModel):
     """Top-level bag for foundation + cross-cutting settings.
 
@@ -103,6 +115,7 @@ class BotSettings(BaseModel):
     providers: ProviderRegistrySettings = Field(default_factory=ProviderRegistrySettings)
     permissions: PermissionsSettings = Field(default_factory=PermissionsSettings)
     personas: PersonaSettings = Field(default_factory=PersonaSettings)
+    github: GitHubSettings = Field(default_factory=GitHubSettings)
 
 
 _YAML_PATH = Path("./config/deilebot.yaml")
@@ -151,11 +164,13 @@ def _build_settings() -> BotSettings:
     providers_data = yaml_data.get("providers", {})
     permissions_data = yaml_data.get("permissions", {})
     personas_data = yaml_data.get("personas", {})
+    github_data = yaml_data.get("github", {})
     return BotSettings(
         foundation=FoundationSettings(**foundation_data),
         providers=ProviderRegistrySettings(**providers_data),
         permissions=PermissionsSettings(**permissions_data),
         personas=PersonaSettings(**personas_data),
+        github=GitHubSettings(**github_data),
     )
 
 

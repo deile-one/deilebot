@@ -99,6 +99,10 @@ class DiscordAdapter(ProviderAdapter):
                     if "AdminCog" not in cog_names:
                         from deilebot.providers.discord.cogs.admin_cog import AdminCog
                         await client.add_cog(AdminCog(client, self.runtime, self))
+                    if "GitHubAuthCog" not in cog_names:
+                        from deilebot.providers.discord.cogs.github_auth_cog import \
+                            GitHubAuthCog
+                        await client.add_cog(GitHubAuthCog(client, self.runtime, self))
                     if "StatusCog" not in cog_names:
                         from deilebot.providers.discord.cogs.status_cog import StatusCog
                         await client.add_cog(StatusCog(client, self.runtime, self))
