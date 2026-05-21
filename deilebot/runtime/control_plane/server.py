@@ -66,6 +66,7 @@ class ControlPlaneServer:
         srv.register_adapter("discord", discord_adapter)
         srv.audit_logger = bot_audit
         srv.identity = identity_resolver
+        srv.store = conversation_store
         port = await srv.start()    # returns bound port
         ...
         await srv.stop()
@@ -77,6 +78,11 @@ class ControlPlaneServer:
         self.adapters: Dict[str, Any] = {}
         self.audit_logger: Optional[Any] = None
         self.identity: Optional[Any] = None
+        # Optional ConversationStore — when set, route handlers persist
+        # every message posted/edited through the control-plane into the
+        # `message` table, so the worker's live status message (and any
+        # other out-of-process post) is part of the stored conversation.
+        self.store: Optional[Any] = None
         # Optional MetricsCollector — when set, route handlers emit
         # operator-visible counters (e.g. bot_whatsapp_conversations_total).
         # Left as None when the daemon does not need metrics.

@@ -11,8 +11,10 @@ import pytest
 from deilebot_client import (BotClientAuthError, BotControlClient,
                               BotControlSettings)
 
+from deilebot._testing import make_channel, make_envelope, make_user
 from deilebot.foundation.capabilities import ProviderCapabilities
-from deilebot.foundation.envelope import AttachmentKind
+from deilebot.foundation.conversation_store import ConversationStore
+from deilebot.foundation.envelope import AttachmentKind, ChannelScope
 from deilebot.runtime.control_plane import (ControlPlaneServer,
                                              ControlPlaneSettings)
 
@@ -43,6 +45,9 @@ class FakeAdapter:
     async def send_dm(self, user, text, attachments=()):
         self.calls.append(("send_dm", user.provider_user_id, text))
         return "dm-99"
+
+    async def edit_message(self, channel, message_id, text):
+        self.calls.append(("edit_message", channel.provider_channel_id, message_id, text))
 
 
 @pytest.fixture
@@ -204,3 +209,107 @@ async def test_whatsapp_send_template_failure_emits_fail_metric(wa_daemon):
         and s["labels"].get("category") == "marketing"
         for s in wa_series
     ), f"expected fail/marketing entry, got {wa_series}"
+
+
+# ---------------------------------------------------------------------------
+# Control-plane → ConversationStore persistence
+#
+# The deile-worker posts its live status message through the control
+# plane. Without persistence that message — visible on the user's screen
+# — would never enter the `message` table. These tests pin that down.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def daemon_with_store(tmp_path):
+    """ControlPlaneServer wired with a real ConversationStore (server.store)."""
+    store = ConversationStore(tmp_path / "bot.sqlite")
+    await store.init()
+    settings = ControlPlaneSettings(host="127.0.0.1", port=0, auth_token="cp-test")
+    srv = ControlPlaneServer(settings, version="cp-test")
+    adapter = FakeAdapter()
+    srv.register_adapter("discord", adapter)
+    srv.store = store
+    port = await srv.start()
+    yield srv, adapter, port, store
+    await srv.stop()
+    await store.close()
+
+
+async def _seed_inbound(store, channel_id):
+    """Record one inbound so the channel has a conversation partner."""
+    ch = make_channel(
+        provider="discord", provider_channel_id=channel_id, scope=ChannelScope.DM
+    )
+    user = make_user(provider="discord", provider_user_id=f"u-{channel_id}")
+    await store.upsert_user(user)
+    await store.upsert_channel(ch)
+    await store.record_inbound(
+        make_envelope(channel=ch, author=user, message_id=f"in-{channel_id}", text="oi")
+    )
+    return ch, user
+
+
+async def test_channel_post_persists_outbound(daemon_with_store):
+    _srv, _adapter, port, store = daemon_with_store
+    ch, user = await _seed_inbound(store, "chan-post")
+    settings = BotControlSettings(endpoint=f"http://127.0.0.1:{port}", auth_token="cp-test")
+    async with BotControlClient(settings) as cli:
+        post = await cli.discord_channel_post(channel_id="chan-post", text="worker status")
+    outbound = [
+        m for m in await store.get_recent_messages("discord", ch)
+        if m.direction == "outbound"
+    ]
+    assert len(outbound) == 1
+    assert outbound[0].text == "worker status"
+    assert outbound[0].provider_message_id == post.message_id
+    # Attributed to the channel's conversation partner (FK-valid).
+    assert outbound[0].bot_user_id == user.bot_user_id
+
+
+async def test_message_edit_syncs_stored_text(daemon_with_store):
+    _srv, _adapter, port, store = daemon_with_store
+    ch, _user = await _seed_inbound(store, "chan-edit")
+    settings = BotControlSettings(endpoint=f"http://127.0.0.1:{port}", auth_token="cp-test")
+    async with BotControlClient(settings) as cli:
+        post = await cli.discord_channel_post(
+            channel_id="chan-edit", text="🔧 inicializando"
+        )
+        await cli.discord_message_edit(
+            channel_id="chan-edit", message_id=post.message_id, text="✅ concluído"
+        )
+    outbound = [
+        m for m in await store.get_recent_messages("discord", ch)
+        if m.direction == "outbound"
+    ]
+    assert len(outbound) == 1  # one row — edited in place, not duplicated
+    assert outbound[0].text == "✅ concluído"
+
+
+async def test_channel_post_without_inbound_is_skipped(daemon_with_store):
+    """No inbound in the channel → outbound can't be FK-attributed → skipped.
+
+    The send itself still succeeds; only persistence is skipped.
+    """
+    _srv, _adapter, port, store = daemon_with_store
+    settings = BotControlSettings(endpoint=f"http://127.0.0.1:{port}", auth_token="cp-test")
+    async with BotControlClient(settings) as cli:
+        post = await cli.discord_channel_post(channel_id="orphan", text="x")
+        assert post.message_id == "msg-99"  # send succeeded
+    ch = make_channel(provider="discord", provider_channel_id="orphan")
+    assert await store.get_recent_messages("discord", ch) == []
+
+
+async def test_persistence_failure_does_not_break_send(daemon_with_store):
+    """A store error during persist must not fail the already-sent message."""
+    _srv, _adapter, port, store = daemon_with_store
+    await _seed_inbound(store, "chan-resilient")
+
+    async def _boom(*a, **k):
+        raise RuntimeError("store down")
+
+    store.record_outbound = _boom  # type: ignore[method-assign]
+    settings = BotControlSettings(endpoint=f"http://127.0.0.1:{port}", auth_token="cp-test")
+    async with BotControlClient(settings) as cli:
+        post = await cli.discord_channel_post(channel_id="chan-resilient", text="still ok")
+        assert post.message_id == "msg-99"

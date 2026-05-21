@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from tenacity import (AsyncRetrying, retry_if_exception_type,
                       stop_after_attempt, wait_exponential)
@@ -20,7 +20,8 @@ from deilebot.foundation.agent_bridge import (AgentBridge, AgentInvocation,
 from deilebot.foundation.agent_meta import AgentMetaProvider
 from deilebot.foundation.audit import AuditEventType, BotAuditLogger
 from deilebot.foundation.capabilities import CapabilityCatalog
-from deilebot.foundation.conversation_store import ConversationStore
+from deilebot.foundation.conversation_store import (ConversationStore,
+                                                     StoredMessage)
 from deilebot.foundation.dlq import DeadLetterQueue
 from deilebot.foundation.envelope import (BotUser, Channel, MessageEnvelope,
                                            TemplateMessage)
@@ -43,6 +44,41 @@ class RetryPolicy:
     max_attempts: int = 3
     base_seconds: float = 0.2
     max_seconds: float = 5.0
+
+
+def render_history_for_worker(
+    history: List[StoredMessage],
+    *,
+    exclude_message_id: Optional[str] = None,
+    limit: int = 20,
+    max_chars: int = 8000,
+) -> str:
+    """Render recent channel messages as a compact text block for the worker.
+
+    The deile-worker runs one-shot (a fresh session per dispatch), so when
+    the bot delegates a follow-up ("agora adiciona um teste pra aquele
+    arquivo") the worker needs the prior turns as context. ``history``
+    arrives newest-first (as ``ConversationStore.get_recent_messages``
+    returns it); this emits the most recent ``limit`` messages
+    oldest-first, labelled by direction, with per-message and total
+    length caps. The message identified by ``exclude_message_id`` (the
+    current inbound, already captured verbatim as the brief) is dropped.
+    """
+    msgs = [
+        m
+        for m in history
+        if not exclude_message_id or m.provider_message_id != exclude_message_id
+    ]
+    msgs = list(reversed(msgs[:limit]))  # newest-first slice → oldest-first
+    lines: List[str] = []
+    for m in msgs:
+        who = "user" if m.direction == "inbound" else "deile"
+        text = " ".join((m.text or "").split())
+        if len(text) > 400:
+            text = text[:399] + "…"
+        lines.append(f"[{who}] {text}")
+    block = "\n".join(lines)
+    return block[-max_chars:] if len(block) > max_chars else block
 
 
 class EgressPipeline:
@@ -481,6 +517,14 @@ class IngressPipeline:
                 # the agent having to ask. Discord CDN URLs are public,
                 # no auth required to download.
                 "attachments": att_summaries,
+                # Recent channel turns, pre-rendered. dispatch_deile_task
+                # forwards this to the worker so a bot-mediated follow-up
+                # has context (the worker itself is one-shot). The /deile
+                # passthrough never goes through here, so it stays
+                # historyless by construction.
+                "recent_history": render_history_for_worker(
+                    history, exclude_message_id=env.message_id
+                ),
             },
             timeout_seconds=bot_settings.agent_invocation_timeout_seconds,
         )

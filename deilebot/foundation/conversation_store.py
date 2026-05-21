@@ -247,6 +247,79 @@ class ConversationStore:
             await db.commit()
             return row_id
 
+    async def update_message_text(
+        self,
+        provider: str,
+        provider_channel_id: str,
+        provider_message_id: str,
+        text: str,
+        *,
+        direction: str = "outbound",
+    ) -> bool:
+        """Update the stored text of an existing message row.
+
+        Used when a message is edited on the provider side — most notably
+        the deile-worker's live status message, which is posted once and
+        then edited repeatedly with progress and the final result. Keeping
+        the row in sync means the persisted conversation always mirrors
+        what the user sees on screen.
+
+        ``sent_at`` is intentionally NOT touched — the message keeps its
+        original position in the conversation order; only ``text`` and
+        ``persisted_at`` change. Returns True when a row was updated.
+        """
+        async with self._lock:
+            db = self._require_db()
+            cursor = await db.execute(
+                """
+                UPDATE message SET text = ?, persisted_at = ?
+                WHERE provider = ? AND provider_channel_id = ?
+                  AND provider_message_id = ? AND direction = ?
+                """,
+                (
+                    text,
+                    _utc_now_iso(),
+                    provider,
+                    provider_channel_id,
+                    provider_message_id,
+                    direction,
+                ),
+            )
+            updated = (cursor.rowcount or 0) > 0
+            await cursor.close()
+            await db.commit()
+            return updated
+
+    async def get_last_inbound_bot_user_id(
+        self,
+        provider: str,
+        provider_channel_id: str,
+    ) -> Optional[str]:
+        """Return the bot_user_id of the most recent inbound in a channel.
+
+        Outbound rows carry a ``bot_user_id`` whose FK requires it to
+        exist in ``bot_user``. When an out-of-process caller (the
+        deile-worker, through the control-plane) posts a message, it does
+        not know which conversation partner the channel belongs to — this
+        resolves it from the latest inbound, mirroring how the egress
+        pipeline tags outbound with the recipient's id. Returns None when
+        the channel has no inbound yet.
+        """
+        db = self._require_db()
+        cursor = await db.execute(
+            """
+            SELECT bot_user_id FROM message
+            WHERE provider = ? AND provider_channel_id = ?
+              AND direction = 'inbound'
+            ORDER BY sent_at DESC, id DESC
+            LIMIT 1
+            """,
+            (provider, provider_channel_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row[0] if row else None
+
     async def get_recent_messages(
         self,
         provider: str,

@@ -385,3 +385,83 @@ class TestGetWindow:
         # 1h window — closed; 24h window — open
         assert (await store.get_window("whatsapp", ch, window_hours=1)).is_open is False
         assert (await store.get_window("whatsapp", ch, window_hours=24)).is_open is True
+
+
+class TestUpdateMessageText:
+    """update_message_text — keeps a stored row in sync with provider edits.
+
+    The deile-worker posts one status message and edits it live; each
+    edit must update the row so the DB mirrors what the user sees.
+    """
+
+    async def test_update_existing_outbound(self, store):
+        u = make_user()
+        ch = make_channel(scope=ChannelScope.DM)
+        await store.upsert_user(u)
+        await store.upsert_channel(ch)
+        await store.record_outbound(
+            "fake", ch, "out-1", u.bot_user_id, "🔧 inicializando",
+            reply_to=None, sent_at=datetime.now(timezone.utc),
+        )
+        ok = await store.update_message_text(
+            "fake", ch.provider_channel_id, "out-1", "✅ concluído"
+        )
+        assert ok is True
+        msgs = await store.get_recent_messages("fake", ch)
+        assert len(msgs) == 1  # edited in place — not a duplicate row
+        assert msgs[0].text == "✅ concluído"
+
+    async def test_update_missing_row_returns_false(self, store):
+        ch = make_channel()
+        ok = await store.update_message_text(
+            "fake", ch.provider_channel_id, "ghost", "x"
+        )
+        assert ok is False
+
+    async def test_update_keeps_sent_at(self, store):
+        # sent_at is the message's position in the conversation — an edit
+        # must not move it.
+        u = make_user()
+        ch = make_channel(scope=ChannelScope.DM)
+        await store.upsert_user(u)
+        await store.upsert_channel(ch)
+        original = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        await store.record_outbound(
+            "fake", ch, "out-1", u.bot_user_id, "v1",
+            reply_to=None, sent_at=original,
+        )
+        await store.update_message_text("fake", ch.provider_channel_id, "out-1", "v2")
+        msgs = await store.get_recent_messages("fake", ch)
+        assert msgs[0].sent_at == original
+
+
+class TestLastInboundUser:
+    """get_last_inbound_bot_user_id — attributes control-plane posts."""
+
+    async def test_returns_latest_inbound_user(self, store):
+        ch = make_channel(scope=ChannelScope.DM)
+        u = make_user(provider_user_id="u-1")
+        await store.upsert_user(u)
+        await store.upsert_channel(ch)
+        await store.record_inbound(
+            make_envelope(channel=ch, author=u, message_id="in-1", text="oi")
+        )
+        got = await store.get_last_inbound_bot_user_id("fake", ch.provider_channel_id)
+        assert got == u.bot_user_id
+
+    async def test_none_when_no_inbound(self, store):
+        ch = make_channel()
+        got = await store.get_last_inbound_bot_user_id("fake", ch.provider_channel_id)
+        assert got is None
+
+    async def test_ignores_outbound_only_channel(self, store):
+        u = make_user()
+        ch = make_channel(scope=ChannelScope.DM)
+        await store.upsert_user(u)
+        await store.upsert_channel(ch)
+        await store.record_outbound(
+            "fake", ch, "out-1", u.bot_user_id, "só outbound",
+            reply_to=None, sent_at=datetime.now(timezone.utc),
+        )
+        got = await store.get_last_inbound_bot_user_id("fake", ch.provider_channel_id)
+        assert got is None

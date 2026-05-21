@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from deilebot._testing import (FakeAgentMetaProvider, FakeProviderAdapter,
@@ -10,7 +12,8 @@ from deilebot.foundation.agent_bridge import (AgentBridge, AgentInvocation,
                                                AgentResponse)
 from deilebot.foundation.audit import BotAuditLogger
 from deilebot.foundation.capabilities import CapabilityCatalog
-from deilebot.foundation.conversation_store import ConversationStore
+from deilebot.foundation.conversation_store import (ConversationStore,
+                                                     StoredMessage)
 from deilebot.foundation.dlq import DeadLetterQueue
 from deilebot.foundation.envelope import ChannelScope
 from deilebot.foundation.event_bus import BotEventBus
@@ -20,7 +23,8 @@ from deilebot.foundation.metrics import MetricsCollector
 from deilebot.foundation.output_formatter import PlainTextFormatter
 from deilebot.foundation.permissions import PermissionGate
 from deilebot.foundation.persona_selector import PersonaSelector
-from deilebot.foundation.pipeline import EgressPipeline, IngressPipeline
+from deilebot.foundation.pipeline import (EgressPipeline, IngressPipeline,
+                                            render_history_for_worker)
 from deilebot.foundation.rate_limit import RateLimiter
 from deilebot.foundation.settings import BotSettings, PermissionsSettings
 
@@ -163,9 +167,10 @@ class TestAgentFailure:
         pipeline, adapter, _, _, _ = _wire(store, bridge=bridge)
         env = make_envelope(channel=make_channel(scope=ChannelScope.DM), text="hi")
         await pipeline.handle(env, adapter)
-        # fallback message lands in inbox (warn icon)
+        # fallback message lands in inbox (warn icon + the failure reason)
         assert len(adapter.inbox) == 1
-        assert "agent_failed" in adapter.inbox[0]["text"]
+        assert "⚠️" in adapter.inbox[0]["text"]
+        assert "não foi possível processar" in adapter.inbox[0]["text"]
         rows = await store.query_audit(event_type="agent_failed")
         assert len(rows) >= 1
 
@@ -289,3 +294,61 @@ class TestEgressTemplate:
                 _NoTemplate(), u, ch,
                 TemplateMessage(name="x", language="en_US"),
             )
+
+
+class TestRenderHistoryForWorker:
+    """render_history_for_worker — compact context block for the worker.
+
+    The bot-mediated path forwards this to the one-shot worker so it can
+    resolve follow-ups; the /deile passthrough sends none.
+    """
+
+    @staticmethod
+    def _msg(mid: str, direction: str, text: str) -> StoredMessage:
+        now = datetime.now(timezone.utc)
+        return StoredMessage(
+            id=0, provider="discord", provider_channel_id="c",
+            provider_message_id=mid, direction=direction, bot_user_id="u",
+            text=text, reply_to_message_id=None, sent_at=now, persisted_at=now,
+        )
+
+    def test_renders_oldest_first_labelled(self):
+        # get_recent_messages returns newest-first; render flips to oldest-first.
+        history = [
+            self._msg("m3", "inbound", "terceira"),
+            self._msg("m2", "outbound", "segunda"),
+            self._msg("m1", "inbound", "primeira"),
+        ]
+        assert render_history_for_worker(history).splitlines() == [
+            "[user] primeira", "[deile] segunda", "[user] terceira",
+        ]
+
+    def test_excludes_current_message(self):
+        history = [
+            self._msg("cur", "inbound", "mensagem atual"),
+            self._msg("old", "inbound", "antiga"),
+        ]
+        assert render_history_for_worker(
+            history, exclude_message_id="cur"
+        ) == "[user] antiga"
+
+    def test_empty_history_yields_empty_string(self):
+        assert render_history_for_worker([]) == ""
+
+    def test_per_message_truncation(self):
+        line = render_history_for_worker([self._msg("m1", "inbound", "x" * 1000)])
+        assert line.endswith("…")
+        assert len(line) < 450
+
+    def test_total_char_cap(self):
+        history = [self._msg(f"m{i}", "inbound", "y" * 300) for i in range(40)]
+        out = render_history_for_worker(history, limit=40, max_chars=1000)
+        assert len(out) <= 1000
+
+    def test_limit_keeps_most_recent(self):
+        # 30 messages newest-first; limit=5 → the 5 newest, rendered oldest-first.
+        history = [self._msg(f"m{i}", "inbound", f"msg{i}") for i in range(30)]
+        assert render_history_for_worker(history, limit=5).splitlines() == [
+            "[user] msg4", "[user] msg3", "[user] msg2",
+            "[user] msg1", "[user] msg0",
+        ]

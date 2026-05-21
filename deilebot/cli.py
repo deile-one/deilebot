@@ -221,6 +221,11 @@ async def _run_provider(provider: str, guild_ids: Optional[List[int]] = None) ->
             # Wire the ingress pipeline + identity so /v1/test/simulate
             # can run an inbound flow end-to-end without a real Discord msg.
             control_plane.pipeline = ingress
+            # Wire the store so messages posted/edited through the control
+            # plane (notably the deile-worker's live status message) are
+            # persisted into the conversation — `record_outbound` on post,
+            # `update_message_text` on edit.
+            control_plane.store = store
         elif cp_settings.enabled and not cp_settings.auth_token:
             import logging as _logging
 

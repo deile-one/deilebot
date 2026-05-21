@@ -130,6 +130,83 @@ def _channel(adapter, channel_id: str, scope: ChannelScope = ChannelScope.GROUP)
     )
 
 
+async def _persist_outbound(
+    request: web.Request,
+    *,
+    provider: str,
+    channel_id: str,
+    message_id: str,
+    text: str,
+    reply_to: Optional[str] = None,
+) -> None:
+    """Persist a control-plane-posted message into the ConversationStore.
+
+    The deile-worker posts its live status message through the control
+    plane; without this the message the user sees on Discord would never
+    enter the ``message`` table — it would be missing from ``/historico``
+    and from the agent's conversation window. Best-effort: a store failure
+    must never break the already-completed send.
+    """
+    server = request.app["server"]
+    store = getattr(server, "store", None)
+    if store is None:
+        return
+    try:
+        bot_user_id = await store.get_last_inbound_bot_user_id(
+            provider, str(channel_id)
+        )
+        if not bot_user_id:
+            # No inbound in this channel → no conversation partner to
+            # attribute the row to (the FK to bot_user would fail).
+            logger.debug(
+                "control_plane: skip outbound persist, no inbound user for channel %s",
+                channel_id,
+            )
+            return
+        await store.record_outbound(
+            provider=provider,
+            channel=Channel(
+                provider=provider,
+                provider_channel_id=str(channel_id),
+                scope=ChannelScope.GROUP,
+            ),
+            provider_message_id=str(message_id),
+            bot_user_id=bot_user_id,
+            text=text,
+            reply_to=reply_to,
+            sent_at=datetime.now(timezone.utc),
+        )
+    except Exception:  # pragma: no cover - persistence must never break a send
+        logger.exception("control_plane: outbound persist failed")
+
+
+async def _persist_message_edit(
+    request: web.Request,
+    *,
+    provider: str,
+    channel_id: str,
+    message_id: str,
+    text: str,
+) -> None:
+    """Sync an edited message's text into the ConversationStore.
+
+    The worker edits its status message live (progress, then the final
+    result); each edit updates the stored row so the DB mirrors what the
+    user sees on screen. A no-op when the message is not stored.
+    Best-effort.
+    """
+    server = request.app["server"]
+    store = getattr(server, "store", None)
+    if store is None:
+        return
+    try:
+        await store.update_message_text(
+            provider, str(channel_id), str(message_id), text
+        )
+    except Exception:  # pragma: no cover - persistence must never break an edit
+        logger.exception("control_plane: message-edit persist failed")
+
+
 # ---- Handlers ---------------------------------------------------------------
 
 
@@ -185,6 +262,14 @@ async def channel_post(request: web.Request) -> web.Response:
         {"op": "channel.post", "channel_id": body.channel_id, "message_id": str(msg_id)},
     )
     _audit_outbound(request, "channel.post", ok=True, channel_id=body.channel_id, message_id=str(msg_id))
+    await _persist_outbound(
+        request,
+        provider=adapter.name,
+        channel_id=body.channel_id,
+        message_id=str(msg_id),
+        text=body.text,
+        reply_to=body.reply_to,
+    )
     return web.json_response(payload.model_dump(mode="json"))
 
 
@@ -419,6 +504,13 @@ async def message_edit(request: web.Request) -> web.Response:
         {"op": "message.edit", "channel_id": body.channel_id, "message_id": body.message_id},
     )
     _audit_outbound(request, "message.edit", ok=True, channel_id=body.channel_id, message_id=body.message_id)
+    await _persist_message_edit(
+        request,
+        provider=adapter.name,
+        channel_id=body.channel_id,
+        message_id=body.message_id,
+        text=body.text,
+    )
     return web.json_response(payload.model_dump(mode="json"))
 
 
@@ -447,6 +539,13 @@ async def role_mention(request: web.Request) -> web.Response:
         request,
         "outbound_sent",
         {"op": "role.mention", "channel_id": body.channel_id, "message_id": str(msg.id)},
+    )
+    await _persist_outbound(
+        request,
+        provider=adapter.name,
+        channel_id=body.channel_id,
+        message_id=str(msg.id),
+        text=content,
     )
     return web.json_response(payload.model_dump(mode="json"))
 
