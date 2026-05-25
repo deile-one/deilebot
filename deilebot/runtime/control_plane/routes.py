@@ -242,12 +242,15 @@ async def channel_post(request: web.Request) -> web.Response:
     except CapabilityNotSupported as e:
         await _emit_audit(request, "outbound_failed", {"op": "channel.post", "reason": "capability"})
         return json_error("UPSTREAM_ERROR", e.message, status=502)
+    except ProviderError as e:
+        # ORDEM: ProviderError ANTES do catch-all (PermissionDenied, BotFoundationError).
+        # ProviderError herda de BotFoundationError, então o catch-all pegaria primeiro
+        # e classificaria upstream como "denied" + 403 — escondendo o erro real.
+        await _emit_audit(request, "outbound_failed", {"op": "channel.post", "reason": "upstream"})
+        return json_error("UPSTREAM_ERROR", e.message, status=502)
     except (PermissionDenied, BotFoundationError) as e:
         await _emit_audit(request, "outbound_failed", {"op": "channel.post", "reason": "denied"})
         return json_error("FORBIDDEN", e.message, status=403)
-    except ProviderError as e:
-        await _emit_audit(request, "outbound_failed", {"op": "channel.post", "reason": "upstream"})
-        return json_error("UPSTREAM_ERROR", e.message, status=502)
     except Exception:
         logger.exception("channel.post failed")
         return json_error("INTERNAL_ERROR", "unexpected failure", status=500)
@@ -484,12 +487,13 @@ async def message_edit(request: web.Request) -> web.Response:
     except CapabilityNotSupported as e:
         await _emit_audit(request, "outbound_failed", {"op": "message.edit", "reason": "capability"})
         return json_error("UPSTREAM_ERROR", e.message, status=502)
+    except ProviderError as e:
+        # ProviderError antes do catch-all — ver comentário em channel.post.
+        await _emit_audit(request, "outbound_failed", {"op": "message.edit", "reason": "upstream"})
+        return json_error("UPSTREAM_ERROR", e.message, status=502)
     except (PermissionDenied, BotFoundationError) as e:
         await _emit_audit(request, "outbound_failed", {"op": "message.edit", "reason": "denied"})
         return json_error("FORBIDDEN", e.message, status=403)
-    except ProviderError as e:
-        await _emit_audit(request, "outbound_failed", {"op": "message.edit", "reason": "upstream"})
-        return json_error("UPSTREAM_ERROR", e.message, status=502)
     except Exception:
         logger.exception("message.edit failed")
         return json_error("INTERNAL_ERROR", "unexpected failure", status=500)
@@ -616,6 +620,15 @@ async def whatsapp_send_template(request: web.Request) -> web.Response:
             {"op": "whatsapp.send_template", "reason": "capability"},
         )
         return json_error("UPSTREAM_ERROR", e.message, status=502)
+    except ProviderError as e:
+        # ProviderError antes do catch-all — ver comentário em channel.post.
+        _emit_metric("fail")
+        await _emit_audit(
+            request,
+            "outbound_failed",
+            {"op": "whatsapp.send_template", "reason": "upstream"},
+        )
+        return json_error("UPSTREAM_ERROR", e.message, status=502)
     except (PermissionDenied, BotFoundationError) as e:
         _emit_metric("fail")
         await _emit_audit(
@@ -624,14 +637,6 @@ async def whatsapp_send_template(request: web.Request) -> web.Response:
             {"op": "whatsapp.send_template", "reason": "denied"},
         )
         return json_error("FORBIDDEN", e.message, status=403)
-    except ProviderError as e:
-        _emit_metric("fail")
-        await _emit_audit(
-            request,
-            "outbound_failed",
-            {"op": "whatsapp.send_template", "reason": "upstream"},
-        )
-        return json_error("UPSTREAM_ERROR", e.message, status=502)
     except Exception:
         _emit_metric("fail")
         logger.exception("whatsapp.send_template failed")

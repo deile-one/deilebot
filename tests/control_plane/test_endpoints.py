@@ -313,3 +313,78 @@ async def test_persistence_failure_does_not_break_send(daemon_with_store):
     async with BotControlClient(settings) as cli:
         post = await cli.discord_channel_post(channel_id="chan-resilient", text="still ok")
         assert post.message_id == "msg-99"
+
+
+# ---------------------------------------------------------------------------
+# Exception-order regression — ProviderError must NOT be classified as denied.
+#
+# ``ProviderError`` herda de ``BotFoundationError``. Antes desta correção
+# (PR a partir da issue dos warnings k8s), o handler do channel.post /
+# message.edit / whatsapp.send_template tinha a ordem invertida:
+#
+#     except (PermissionDenied, BotFoundationError) as e:  # ← cobre ProviderError
+#         return 403 / reason=denied
+#     except ProviderError as e:                            # ← nunca executa
+#         return 502 / reason=upstream
+#
+# Resultado: erros upstream (rede, canal não encontrado, rate-limit) eram
+# logados como "denied" e retornados como 403/FORBIDDEN, mascarando o
+# problema real. Estes testes pinam a ordem correta — qualquer regressão
+# vai ver o teste virar BotClientAuthError (403) em vez de
+# BotClientUpstreamError (502).
+# ---------------------------------------------------------------------------
+
+
+async def test_channel_post_provider_error_returns_502_upstream(daemon):
+    """ProviderError no adapter → cliente recebe BotClientUpstreamError (502).
+
+    Regression: antes do fix, ProviderError caía no catch-all
+    BotFoundationError e voltava 403 (BotClientAuthError).
+    """
+    from deilebot.foundation.exceptions import ProviderError
+    from deilebot_client import BotClientUpstreamError
+
+    _srv, adapter, port = daemon
+
+    async def _fail(channel, text, reply_to=None, attachments=()):
+        raise ProviderError("channel lookup failed: 50001", context={})
+
+    adapter.send_message = _fail  # type: ignore[method-assign]
+    settings = BotControlSettings(endpoint=f"http://127.0.0.1:{port}", auth_token="cp-test")
+    async with BotControlClient(settings) as cli:
+        with pytest.raises(BotClientUpstreamError):
+            await cli.discord_channel_post(channel_id="999", text="x")
+
+
+async def test_channel_post_permission_denied_returns_403(daemon):
+    """PermissionDenied continua retornando 403 — sanity da ordem nova."""
+    from deilebot.foundation.exceptions import PermissionDenied
+    from deilebot_client import BotClientAuthError
+
+    _srv, adapter, port = daemon
+
+    async def _deny(channel, text, reply_to=None, attachments=()):
+        raise PermissionDenied("missing capability", context={})
+
+    adapter.send_message = _deny  # type: ignore[method-assign]
+    settings = BotControlSettings(endpoint=f"http://127.0.0.1:{port}", auth_token="cp-test")
+    async with BotControlClient(settings) as cli:
+        with pytest.raises(BotClientAuthError):
+            await cli.discord_channel_post(channel_id="1", text="x")
+
+
+async def test_message_edit_provider_error_returns_502_upstream(daemon):
+    """ProviderError no adapter.edit_message → 502/UPSTREAM, não 403/denied."""
+    from deilebot.foundation.exceptions import ProviderError
+    from deilebot_client import BotClientUpstreamError
+
+    _srv, adapter, port = daemon
+
+    async def _fail(channel, message_id, text):
+        raise ProviderError("edit failed: 10008", context={})
+
+    adapter.edit_message = _fail  # type: ignore[method-assign]
+    settings = BotControlSettings(endpoint=f"http://127.0.0.1:{port}", auth_token="cp-test")
+    async with BotControlClient(settings) as cli:
+        with pytest.raises(BotClientUpstreamError):
+            await cli.discord_message_edit(channel_id="1", message_id="123", text="x")
